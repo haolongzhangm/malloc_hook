@@ -31,13 +31,8 @@ else ()
 endif ()
 
 add_library(dma_alloc_hook SHARED ${CMAKE_SOURCE_DIR}/src/dma_alloc_hook.cpp)
-target_link_libraries(dma_alloc_hook PRIVATE backtrace_header)
+target_link_libraries(dma_alloc_hook PRIVATE backtrace_header log)
 install(TARGETS dma_alloc_hook DESTINATION ${CMAKE_INSTALL_PREFIX}/out/lib)
-
-add_library(checkleak SHARED ${CMAKE_SOURCE_DIR}/src/checkleak.cpp)
-target_link_directories(checkleak PRIVATE ${VNDK_LIB_PATH} ${APEX_LIB_PATH})
-target_link_libraries(checkleak PRIVATE log backtrace backtrace_header c_malloc_debug)
-install(TARGETS checkleak DESTINATION ${CMAKE_INSTALL_PREFIX}/out/lib)
 
 # copy database compile_commands.json to PROJECT_SOURCE_DIR
 add_custom_target(

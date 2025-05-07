@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <map>
 #include <mutex>
+#include <android/log.h>
 
 class Timer {
     std::chrono::high_resolution_clock::time_point m_start;
@@ -38,8 +39,24 @@ public:
     }
 };
 
+void print_log_to_file(const char* format, ...) {
+    char file_name[64] = {0};
+    auto pid = getpid();
+    sprintf(file_name, "/data/local/tmp/dma_alloc_hook_%d.log", pid);
+
+    FILE* fp = fopen(file_name, "a+");
+    if (fp == NULL) {
+        printf("open file %s failed\n", file_name);
+        return;
+    }
+    va_list args;
+    va_start(args, format);
+    vfprintf(fp, format, args);
+    va_end(args);
+    fclose(fp);
+}
+
 class IoctlHook {
-    pid_t m_pid = getpid();
     int (*m_ioctl)(int __fd, int __request, ...);
     int (*m_close)(int __fd);
     std::mutex m_mutex;
@@ -59,14 +76,14 @@ class IoctlHook {
         android::CallStack stack;
         stack.update();
         android::String8 str = stack.toString();
-        printf("%s\n", str.string());
+        print_log_to_file("%s\n", str.string());
     }
 
     int show_non_dma_info() {
         int rss = -1;
         struct rusage usage;
         getrusage(RUSAGE_SELF, &usage);
-        printf("NON-DMA info: maxrss: %ld KB\n", usage.ru_maxrss);
+        print_log_to_file("NON-DMA info: maxrss: %ld KB\n", usage.ru_maxrss);
         auto parse_line = [](char* line) -> int {
             //! This assumes that a digit will be found and the line ends in " KB".
             int i = strlen(line);
@@ -79,6 +96,7 @@ class IoctlHook {
 
         char file_name[64] = {0};
         char line_buff[512] = {0};
+        auto m_pid = getpid();
         sprintf(file_name, "/proc/%d/status", m_pid);
 
         auto fp = std::unique_ptr<FILE, int (*)(FILE*)>(fopen(file_name, "r"), fclose);
@@ -97,11 +115,17 @@ class IoctlHook {
         return rss * 1024;
     }
 
-    void show_peak_size() { printf("DMA: peak size: %f KB\n", m_dma_peak / 1024.0); }
-    void show_used_size() { printf("DMA: used size: %f KB\n", m_used_size / 1024.0); }
+    void show_peak_size() {
+        print_log_to_file("DMA: peak size: %f KB\n", m_dma_peak / 1024.0);
+    }
+    void show_used_size() {
+        print_log_to_file("DMA: used size: %f KB\n", m_used_size / 1024.0);
+    }
     void show_unreleased_fds() {
         for (auto& it : m_alloc_info) {
-            printf("unreleased fd: %d, size: %f KB\n", it.first, it.second.first / 1024.0);
+            print_log_to_file(
+                    "unreleased fd: %d, size: %f KB\n", it.first,
+                    it.second.first / 1024.0);
         }
     }
 
@@ -110,7 +134,7 @@ public:
 #ifdef __OHOS__
         auto handle = dlopen("libc.so", RTLD_LAZY);
         if (!handle) {
-            printf("dlopen failed: %s\n", dlerror());
+            print_log_to_file("dlopen failed: %s\n", dlerror());
             abort();
         }
         m_ioctl = reinterpret_cast<decltype(m_ioctl)>(dlsym(handle, "ioctl"));
@@ -120,11 +144,11 @@ public:
         m_close = reinterpret_cast<decltype(m_close)>(dlsym(RTLD_NEXT, "close"));
 #endif
         if (!m_ioctl) {
-            printf("dlsym failed: %s\n", dlerror());
+            print_log_to_file("dlsym failed: %s\n", dlerror());
             abort();
         }
         if (!m_close) {
-            printf("dlsym failed: %s\n", dlerror());
+            print_log_to_file("dlsym failed: %s\n", dlerror());
             abort();
         }
         std::atexit([] {
@@ -132,13 +156,20 @@ public:
             IoctlHook::GetInstance().show_peak_size();
             IoctlHook::GetInstance().show_used_size();
             IoctlHook::GetInstance().show_unreleased_fds();
-            printf("may NON-DMA+DMA peak size(only for reference, not accuracy, "
-                   "depends on DMA alloc frequency): %f KB\n",
-                   IoctlHook::GetInstance().m_may_peak_with_dma_and_no_dma / 1024.0);
+            print_log_to_file(
+                    "may NON-DMA+DMA peak size(only for reference, not accuracy, "
+                    "depends on DMA alloc frequency): %f KB\n",
+                    IoctlHook::GetInstance().m_may_peak_with_dma_and_no_dma / 1024.0);
         });
     }
+#undef LOG_TAG
+#define LOG_TAG "DMA_ALLOC_HOOK"
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
     int ioctl(int __fd, unsigned int __request, ...) {
+        auto msg = "pid: " + std::to_string(getpid()) + " fd: " + std::to_string(__fd) +
+                   " request: " + std::to_string(__request);
+        LOGE("%s", msg.c_str());
         va_list ap;
         va_start(ap, __request);
         void* arg = va_arg(ap, void*);
@@ -154,27 +185,32 @@ public:
             if (m_used_size > m_dma_peak) {
                 m_dma_peak = m_used_size;
             }
-            printf("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
-                   "++++\n");
+            print_log_to_file(
+                    "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
+                    "+"
+                    "++++\n");
             auto non_dma_rss = show_non_dma_info();
             auto _ = m_used_size + non_dma_rss;
             if (_ > m_may_peak_with_dma_and_no_dma) {
                 m_may_peak_with_dma_and_no_dma = _;
             }
-            printf("dma alloc happened: fd: %d(%d), request: %u size: %f KB used: %f "
-                   "KB, peak: %f KB count: %zu \n",
-                   __fd, heap_data->fd, __request, heap_data->len / 1024.0,
-                   m_used_size / 1024.0, m_dma_peak / 1024.0, m_alloc_count);
+            print_log_to_file(
+                    "dma alloc happened: fd: %d(%d), request: %u size: %f KB used: %f "
+                    "KB, peak: %f KB count: %zu \n",
+                    __fd, heap_data->fd, __request, heap_data->len / 1024.0,
+                    m_used_size / 1024.0, m_dma_peak / 1024.0, m_alloc_count);
 
             bt();
             show_peak_size();
             show_used_size();
-            printf("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
-                   "++++\n");
+            print_log_to_file(
+                    "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
+                    "+"
+                    "++++\n");
 
             //! save the alloc info with time info
             m_alloc_info[heap_data->fd] = {heap_data->len, m_timer.get_msecs()};
-            //   printf("alloc info: fd: %d, time: %ld\n", __fd,
+            //   print_log_to_file("alloc info: fd: %d, time: %ld\n", __fd,
             //   m_alloc_info[heap_data->fd]);
         }
 
@@ -182,27 +218,32 @@ public:
     }
 
     int close(int __fd) {
-        // printf("close fd: %d\n", __fd);
+        // print_log_to_file("close fd: %d\n", __fd);
         //! check __fd in m_alloc_info
         if (m_alloc_info.find(__fd) != m_alloc_info.end()) {
             //! TODO: recursive_mutex?
             std::lock_guard<std::mutex> lock(m_mutex);
-            printf("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
-                   "++++\n");
+            print_log_to_file(
+                    "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
+                    "+"
+                    "++++\n");
             auto now = m_timer.get_msecs();
             auto diff = now - m_alloc_info[__fd].second;
             auto size = m_alloc_info[__fd].first;
             m_used_size -= size;
             m_alloc_count -= 1;
-            printf("dma free happened: fd: %d, size: %f KB, duration: %f ms\n", __fd,
-                   size / 1024.0, diff);
+            print_log_to_file(
+                    "dma free happened: fd: %d, size: %f KB, duration: %f ms\n", __fd,
+                    size / 1024.0, diff);
             bt();
             m_alloc_info.erase(__fd);
             show_peak_size();
             show_used_size();
             show_unreleased_fds();
-            printf("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
-                   "++++\n");
+            print_log_to_file(
+                    "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
+                    "+"
+                    "++++\n");
         }
         return m_close(__fd);
     }

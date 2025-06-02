@@ -37,12 +37,12 @@ bool PointerData::Initialize(const Config& config) {
     key_to_index_.clear();
     frames_.clear();
     backtraces_info_.clear();
-    peak_list.clear();
+    peak_list_.clear();
     // A hash index of kBacktraceEmptyIndex indicates that we tried to get
     // a backtrace, but there was nothing recorded.
     cur_hash_index_ = kBacktraceEmptyIndex + 1;
-    current_used = current_host = current_dma = 0;
-    peak_tot = peak_host = peak_dma = 0;
+    current_used_ = current_host_ = current_dma_ = 0;
+    peak_tot_ = peak_host_ = peak_dma_ = 0;
 
     return true;
 }
@@ -60,21 +60,21 @@ void PointerData::Add(const void* ptr, size_t pointer_size, MemType type) {
     gettimeofday(&tv, NULL);
     uintptr_t mangled_ptr = ManglePointer(reinterpret_cast<uintptr_t>(ptr));
     pointers_[mangled_ptr] = PointerInfoType{pointer_size, hash_index, type, tv};
-    current_used += pointer_size;
-    size_t* current = (type == DMA) ? &current_dma : &current_host;
-    size_t* peak = (type == DMA) ? &peak_dma : &peak_host;
+    current_used_ += pointer_size;
+    size_t* current = (type == DMA) ? &current_dma_ : &current_host_;
+    size_t* peak = (type == DMA) ? &peak_dma_ : &peak_host_;
     *current += pointer_size;
     if (*current > *peak) {
         *peak = *current;
     }
-    if (peak_tot < current_used) {
-        peak_tot = current_used;
+    if (peak_tot_ < current_used_) {
+        peak_tot_ = current_used_;
 
         if ((g_debug->config().options() & RECORD_MEMORY_PEAK) &&
-            peak_tot > g_debug->config().backtrace_dump_peak_val()) {
+            peak_tot_ > g_debug->config().backtrace_dump_peak_val()) {
             std::lock_guard<std::mutex> frame_guard(frame_mutex_);
-            peak_list.clear();
-            GetUniqueList(&peak_list, true);
+            peak_list_.clear();
+            GetUniqueList(&peak_list_, true);
         }
     }
 }
@@ -135,8 +135,8 @@ void PointerData::Remove(const void* ptr) {
             // No tracked pointer.
             return;
         }
-        current_used -= entry->second.size;
-        size_t* target = (entry->second.mem_type == DMA) ? &current_dma : &current_host;
+        current_used_ -= entry->second.size;
+        size_t* target = (entry->second.mem_type == DMA) ? &current_dma_ : &current_host_;
         *target -= entry->second.size;
         hash_index = entry->second.hash_index;
         pointers_.erase(mangled_ptr);
@@ -239,7 +239,7 @@ void PointerData::DumpLiveToFile(int fd) {
     std::lock_guard<std::mutex> pointer_guard(pointer_mutex_);
     std::lock_guard<std::mutex> frame_guard(frame_mutex_);
 
-    std::vector<ListInfoType> list = std::move(peak_list);
+    std::vector<ListInfoType> list = std::move(peak_list_);
     if (!(g_debug->config().options() & RECORD_MEMORY_PEAK)) {
         list.clear();
         // Sort by the time of the allocation.
@@ -317,6 +317,6 @@ void PointerData::DumpPeakInfo() {
     printf("\n+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
            "++++++++++++++++\n");
     printf("host peak used: %fMB, dma peak used %fMB, total peak used: %fMB\n\n",
-           peak_host / 1024.0 / 1024.0, peak_dma / 1024.0 / 1024.0,
-           peak_tot / 1024.0 / 1024.0);
+           peak_host_ / 1024.0 / 1024.0, peak_dma_ / 1024.0 / 1024.0,
+           peak_tot_ / 1024.0 / 1024.0);
 }

@@ -168,7 +168,7 @@ use to get malloc and free backtrace, include dmabuffer by hook `ioctl` and `clo
   - `backtrace_max_size_bytes_`: 开启 BACKTRACE_SPECIFIC_SIZES 标志时，抓取 alloc size 小于该值的堆栈信息
   - `RECORD_MEMORY_PEAK`: 是否抓取峰值时刻的堆栈信息
   - `backtrace_dump_peak_val_`: 当峰值大于该值时，记录峰值时刻的堆栈
-  - `DUMP_ON_SINGAL`: 开启 checkpoint 信号机制
+  - `DUMP_ON_SIGNAL`: 开启 checkpoint 信号机制
   - `backtrace_dump_signal_`: checkpoint 信号机制的信号值，默认 33
   - `DUMP_PEAK_VALUE_MB`：环境变量，单位: MB，当内存峰值大于该值时记录峰值内存
   - `BACKTRACE_MIN_SIZE`：环境变量，单位: Byte，当申请内存的 size 大于该值时，才抓取堆栈信息

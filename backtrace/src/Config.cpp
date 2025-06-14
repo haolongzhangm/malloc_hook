@@ -70,7 +70,7 @@ bool Config::Init() {
     backtrace_dump_peak_val_ *= 1024 * 1024;
 
     // 通过信号插入 check point
-    options_ |= DUMP_ON_SINGAL;
+    options_ |= DUMP_ON_SIGNAL;
     backtrace_dump_signal_ = BIONIC_SIGNAL_BACKTRACE;  // BIONIC_SIGNAL_BACKTRACE: 33
 
     return true;

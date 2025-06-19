@@ -117,9 +117,9 @@ private:
             backtraces_info_;
     size_t cur_hash_index_;
 
-    size_t current_used, current_host, current_dma;
-    size_t peak_tot, peak_host, peak_dma;
-    std::vector<ListInfoType> peak_list;
+    size_t current_used_, current_host_, current_dma_;
+    size_t peak_tot_, peak_host_, peak_dma_;
+    std::vector<ListInfoType> peak_list_;
 
     BIONIC_DISALLOW_COPY_AND_ASSIGN(PointerData);
 };

@@ -70,7 +70,7 @@ bool debug_initialize(void* init_space[]) {
 
     ScopedConcurrentLock::Init();
 
-    if (g_debug->config().options() & DUMP_ON_SINGAL) {
+    if (g_debug->config().options() & DUMP_ON_SIGNAL) {
         struct sigaction enable_act = {};
         enable_act.sa_handler = singal_dump_heap;
         enable_act.sa_flags = SA_RESTART | SA_ONSTACK;

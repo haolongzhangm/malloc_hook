@@ -172,4 +172,5 @@ use to get malloc and free backtrace, include dmabuffer by hook `ioctl` and `clo
   - `backtrace_dump_signal_`: checkpoint 信号机制的信号值，默认 33
   - `DUMP_PEAK_VALUE_MB`：环境变量，单位: MB，当内存峰值大于该值时记录峰值内存
   - `BACKTRACE_MIN_SIZE`：环境变量，单位: Byte，当申请内存的 size 大于该值时，才抓取堆栈信息
+  - `DUMP_ON_EXIT`: 环境变量，设置为 1 后在程序退出时 dump backtrace。同时如果 BACKTRACE_MIN_SIZE 没设置的话，会把 backtrace_min_size_bytes_ 默认设置为 1k。
   - `配置文件位于 backtrace/src/Config.cpp, 可在该文件中修改上述参数`

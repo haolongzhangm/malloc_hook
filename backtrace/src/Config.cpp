@@ -66,6 +66,16 @@ bool Config::Init() {
         }
         backtrace_dump_on_exit_ = true;
     }
+
+    // 开启退出时 dump backtrace
+    const char* dump_env = getenv("DUMP_ON_EXIT");
+    if (dump_env != NULL && strcasecmp(dump_env, "1") == 0) {
+        backtrace_dump_on_exit_ = true;
+        if (getenv("BACKTRACE_MIN_SIZE") == nullptr) {
+            backtrace_min_size_bytes_ = 1024;
+        }
+    }
+
     // 单位是 MB
     backtrace_dump_peak_val_ *= 1024 * 1024;
 

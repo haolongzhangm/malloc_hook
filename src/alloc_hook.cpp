@@ -49,15 +49,15 @@ public:
         return debug_posix_memalign(ptr, alignment, size);
     }
     void* memalign(size_t alignment, size_t bytes) { return debug_memalign(alignment, bytes); }
-    void* mmap(void* addr, size_t size, int prot, int flags, int fd, off_t offset) {
-        return debug_mmap(addr, size, prot, flags, fd, offset);
-    }
-    int munmap(void* addr, size_t size) { return debug_munmap(addr, size); }
+    //void* mmap(void* addr, size_t size, int prot, int flags, int fd, off_t offset) {
+    //    return debug_mmap(addr, size, prot, flags, fd, offset);
+    //}
+    //int munmap(void* addr, size_t size) { return debug_munmap(addr, size); }
     int ioctl(int fd, int request, void* arg) { return debug_ioctl(fd, request, arg); }
     int close(int fd) { return debug_close(fd); }
-    void* mmap64(void* addr, size_t size, int prot, int flags, int fd, off_t offset) {
-        return debug_mmap64(addr, size, prot, flags, fd, offset);
-    }
+    //void* mmap64(void* addr, size_t size, int prot, int flags, int fd, off_t offset) {
+    //    return debug_mmap64(addr, size, prot, flags, fd, offset);
+    //}
 
     void checkpoint(const char* file_name) { return debug_dump_heap(file_name); }
 
@@ -129,21 +129,21 @@ int posix_memalign(void** ptr, size_t alignment, size_t size) {
     return AllocHook::inst().posix_memalign(ptr, alignment, size);
 }
 
-void* mmap(void* addr, size_t size, int prot, int flags, int fd, off_t offset) {
-    if (in_preinit_phase || InitState::allocHook_setup) {
-        return (void*)syscall(SYS_mmap, addr, size, prot, flags, fd, offset);
-    }
-    void* result = AllocHook::inst().mmap(addr, size, prot, flags, fd, offset);
-    return result;
-}
-
-int munmap(void* addr, size_t size) {
-    if (in_preinit_phase || InitState::allocHook_setup) {
-        return (int)syscall(SYS_munmap, addr, size);
-    }
-    return AllocHook::inst().munmap(addr, size);
-}
-
+//void* mmap(void* addr, size_t size, int prot, int flags, int fd, off_t offset) {
+//    if (in_preinit_phase || InitState::allocHook_setup) {
+//        return (void*)syscall(SYS_mmap, addr, size, prot, flags, fd, offset);
+//    }
+//    void* result = AllocHook::inst().mmap(addr, size, prot, flags, fd, offset);
+//    return result;
+//}
+//
+//int munmap(void* addr, size_t size) {
+//    if (in_preinit_phase || InitState::allocHook_setup) {
+//        return (int)syscall(SYS_munmap, addr, size);
+//    }
+//    return AllocHook::inst().munmap(addr, size);
+//}
+//
 int ioctl(int fd, int request, ...) {
     va_list ap;
     va_start(ap, request);
@@ -157,13 +157,13 @@ int close(int fd) {
     return AllocHook::inst().close(fd);
 }
 
-void* mmap64(void* addr, size_t size, int prot, int flags, int fd, off_t offset) {
-    if (in_preinit_phase || InitState::allocHook_setup) {
-        return (void*)syscall(SYS_mmap, addr, size, prot, flags, fd, offset);
-    }
-    void* result = AllocHook::inst().mmap64(addr, size, prot, flags, fd, offset);
-    return result;
-}
+//void* mmap64(void* addr, size_t size, int prot, int flags, int fd, off_t offset) {
+//    if (in_preinit_phase || InitState::allocHook_setup) {
+//        return (void*)syscall(SYS_mmap, addr, size, prot, flags, fd, offset);
+//    }
+//    void* result = AllocHook::inst().mmap64(addr, size, prot, flags, fd, offset);
+//    return result;
+//}
 
 void checkpoint(const char* file_name) {
     AllocHook::inst().checkpoint(file_name);

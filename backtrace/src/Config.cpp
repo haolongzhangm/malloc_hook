@@ -10,6 +10,10 @@
 static constexpr size_t DEFAULT_BACKTRACE_FRAMES = 128;
 static constexpr const char DEFAULT_BACKTRACE_DUMP_PREFIX[] =
         "/data/local/tmp/trace/backtrace_heap";
+static constexpr char kSamplingIntervalBytesEnv[] =
+        "ALLOC_HOOK_SAMPLING_INTERVAL_BYTES";
+static constexpr char kSamplingIntervalCompatEnv[] =
+        "ALLOC_HOOK_SAMPLING_INTERVAL";
 
 static bool ParseValue(const char* value, size_t* parsed_value) {
     *parsed_value = 0;
@@ -51,6 +55,17 @@ bool Config::Init() {
     options_ |= BACKTRACE_SPECIFIC_SIZES;
     ParseValue(getenv("BACKTRACE_MIN_SIZE"), &backtrace_min_size_bytes_);
     backtrace_max_size_bytes_ = SIZE_MAX;
+    sampling_interval_bytes_ = 1;
+
+    const char* sampling_interval_env = getenv(kSamplingIntervalBytesEnv);
+    if (sampling_interval_env == nullptr) {
+        sampling_interval_env = getenv(kSamplingIntervalCompatEnv);
+    }
+    size_t sampling_interval_bytes = 0;
+    if (ParseValue(sampling_interval_env, &sampling_interval_bytes) &&
+        sampling_interval_bytes > 1) {
+        sampling_interval_bytes_ = sampling_interval_bytes;
+    }
 
     // 开启 unwind
     options_ |= BACKTRACE;

@@ -56,6 +56,15 @@ static void singal_dump_heap(int) {
     }
 }
 
+static bool ShouldTrackAllocation(
+        size_t requested_size, MemType type, size_t* tracked_size) {
+    if (!g_debug->TrackPointers()) {
+        *tracked_size = requested_size;
+        return false;
+    }
+    return g_debug->pointer->ShouldTrackAllocation(requested_size, type, tracked_size);
+}
+
 bool debug_initialize(void* init_space[]) {
     if (!DebugDisableInitialize()) {
         return false;
@@ -126,13 +135,38 @@ void debug_dump_heap(const char* file_name) {
     close(fd);
 }
 
-static void* InternalMalloc(size_t size) {
-    void* result = m_sys_malloc(size);
-    if (g_debug->TrackPointers()) {
-        g_debug->pointer->Add(result, size);
+static void* InternalMalloc(size_t requested_size, size_t tracked_size) {
+    void* result = m_sys_malloc(requested_size);
+    if (result != nullptr && g_debug->TrackPointers()) {
+        g_debug->pointer->Add(result, requested_size, tracked_size);
     }
 
     return result;
+}
+
+static void* SystemMallocNoHook(size_t size) {
+    ScopedDisableDebugCalls disable;
+    return m_sys_malloc(size);
+}
+
+static void SystemFreeNoHook(void* pointer) {
+    ScopedDisableDebugCalls disable;
+    m_sys_free(pointer);
+}
+
+static void* SystemCallocNoHook(size_t nmemb, size_t size) {
+    ScopedDisableDebugCalls disable;
+    return m_sys_calloc(nmemb, size);
+}
+
+static void* SystemMemalignNoHook(size_t alignment, size_t size) {
+    ScopedDisableDebugCalls disable;
+    return m_sys_memalign(alignment, size);
+}
+
+static void* SystemReallocNoHook(void* pointer, size_t size) {
+    ScopedDisableDebugCalls disable;
+    return m_sys_realloc(pointer, size);
 }
 
 static void InternalFree(void* pointer) {
@@ -147,20 +181,29 @@ void* debug_malloc(size_t size) {
         return m_sys_malloc(size);
     }
 
-    ScopedConcurrentLock lock;
-    ScopedDisableDebugCalls disable;
-
     if (size > PointerInfoType::MaxSize()) {
         errno = ENOMEM;
         return nullptr;
     }
 
-    return InternalMalloc(size);
+    size_t tracked_size = size;
+    if (!ShouldTrackAllocation(size, HOST, &tracked_size)) {
+        return SystemMallocNoHook(size);
+    }
+
+    ScopedConcurrentLock lock;
+    ScopedDisableDebugCalls disable;
+
+    return InternalMalloc(size, tracked_size);
 }
 
 void debug_free(void* pointer) {
     if (DebugCallsDisabled() || pointer == nullptr) {
         return m_sys_free(pointer);
+    }
+
+    if (g_debug->config().sampling_enabled() && !g_debug->pointer->MightContain(pointer)) {
+        return SystemFreeNoHook(pointer);
     }
 
     ScopedConcurrentLock lock;
@@ -174,12 +217,24 @@ void* debug_realloc(void* pointer, size_t bytes) {
         return m_sys_realloc(pointer, bytes);
     }
 
+    if (pointer == nullptr) {
+        if (bytes > PointerInfoType::MaxSize()) {
+            errno = ENOMEM;
+            return nullptr;
+        }
+
+        size_t tracked_size = bytes;
+        if (!ShouldTrackAllocation(bytes, HOST, &tracked_size)) {
+            return SystemReallocNoHook(nullptr, bytes);
+        }
+
+        ScopedConcurrentLock lock;
+        ScopedDisableDebugCalls disable;
+        return InternalMalloc(bytes, tracked_size);
+    }
+
     ScopedConcurrentLock lock;
     ScopedDisableDebugCalls disable;
-
-    if (pointer == nullptr) {
-        return InternalMalloc(bytes);
-    }
 
     if (bytes == 0) {
         InternalFree(pointer);
@@ -191,14 +246,18 @@ void* debug_realloc(void* pointer, size_t bytes) {
         return nullptr;
     }
 
-    if (g_debug->TrackPointers()) {
-        g_debug->pointer->Remove(pointer);
+    size_t tracked_size = bytes;
+    bool track_new_allocation = ShouldTrackAllocation(bytes, HOST, &tracked_size);
+    void* new_pointer = m_sys_realloc(pointer, bytes);
+    if (new_pointer == nullptr) {
+        return nullptr;
     }
 
-    void* new_pointer = m_sys_realloc(pointer, bytes);
-
     if (g_debug->TrackPointers()) {
-        g_debug->pointer->Add(new_pointer, bytes);
+        g_debug->pointer->Remove(pointer);
+        if (track_new_allocation) {
+            g_debug->pointer->Add(new_pointer, bytes, tracked_size);
+        }
     }
 
     return new_pointer;
@@ -209,9 +268,6 @@ void* debug_calloc(size_t nmemb, size_t bytes) {
         return m_sys_calloc(nmemb, bytes);
     }
 
-    ScopedConcurrentLock lock;
-    ScopedDisableDebugCalls disable;
-
     size_t size;
     if (__builtin_mul_overflow(nmemb, bytes, &size)) {
         // Overflow
@@ -219,9 +275,17 @@ void* debug_calloc(size_t nmemb, size_t bytes) {
         return nullptr;
     }
 
+    size_t tracked_size = size;
+    if (!ShouldTrackAllocation(size, HOST, &tracked_size)) {
+        return SystemCallocNoHook(1, size);
+    }
+
+    ScopedConcurrentLock lock;
+    ScopedDisableDebugCalls disable;
+
     void* pointer = m_sys_calloc(1, size);
     if (pointer != nullptr && g_debug->TrackPointers()) {
-        g_debug->pointer->Add(pointer, size);
+        g_debug->pointer->Add(pointer, size, tracked_size);
     }
 
     return pointer;
@@ -232,18 +296,23 @@ void* debug_memalign(size_t alignment, size_t bytes) {
         return m_sys_memalign(alignment, bytes);
     }
 
-    ScopedConcurrentLock lock;
-    ScopedDisableDebugCalls disable;
-
     if (bytes > PointerInfoType::MaxSize()) {
         errno = ENOMEM;
         return nullptr;
     }
 
+    size_t tracked_size = bytes;
+    if (!ShouldTrackAllocation(bytes, HOST, &tracked_size)) {
+        return SystemMemalignNoHook(alignment, bytes);
+    }
+
+    ScopedConcurrentLock lock;
+    ScopedDisableDebugCalls disable;
+
     void* pointer = m_sys_memalign(alignment, bytes);
 
     if (pointer != nullptr && g_debug->TrackPointers()) {
-        g_debug->pointer->Add(pointer, bytes);
+        g_debug->pointer->Add(pointer, bytes, tracked_size);
     }
 
     return pointer;
@@ -366,7 +435,7 @@ int debug_ioctl(int fd, unsigned int request, void* arg) {
     size_t node_sz = 0;
     if (g_debug->TrackPointers() && DMA_BUF::handle_dma_node(request, arg, &node_fd, &node_sz)) {
         void* ptr = reinterpret_cast<void*>(node_fd);
-        g_debug->pointer->Add(ptr, node_sz, DMA);
+        g_debug->pointer->Add(ptr, node_sz, node_sz, DMA);
     }
 
     return ret;
@@ -405,7 +474,7 @@ void* debug_mmap64(void* addr, size_t size, int prot, int flags, int fd, off_t o
 
     if (g_debug->TrackPointers() && DMA_BUF::gpu_ioctl_alloc) {
         DMA_BUF::gpu_ioctl_alloc = false;  // Reset the flag immediately after processing
-        g_debug->pointer->Add(result, size, DMA);
+        g_debug->pointer->Add(result, size, size, DMA);
     }
 
     return result;
@@ -428,10 +497,10 @@ void* debug_mmap(void* addr, size_t size, int prot, int flags, int fd, off_t off
     if (g_debug->TrackPointers()) {
         size_t node_sz = 0;
         if (fd < 0)
-            g_debug->pointer->Add(result, size, MMAP);
+            g_debug->pointer->Add(result, size, size, MMAP);
         else if (DMA_BUF::is_dma_buf(fd, &node_sz)) {
             void* ptr = reinterpret_cast<void*>(fd);
-            g_debug->pointer->Add(ptr, node_sz, DMA);
+            g_debug->pointer->Add(ptr, node_sz, node_sz, DMA);
         }
     }
 

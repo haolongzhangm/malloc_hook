@@ -33,6 +33,13 @@
 
 #include <unwindstack/Unwinder.h>
 
+enum class UnwindBackend {
+    kLibunwindstack,
+    kFramePointer,
+};
+
 unwindstack::ErrorCode Unwind(
         std::vector<uintptr_t>* frames, std::vector<unwindstack::FrameData>* info,
         size_t max_frames);
+
+UnwindBackend GetConfiguredUnwindBackend();

@@ -1,17 +1,21 @@
 #include <cxxabi.h>
 #include <inttypes.h>
+#include <pthread.h>
 #include <sys/time.h>
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <random>
 #include <cstdio>
 #include <memory>
 #include <mutex>
+#include <new>
 
 #include "Config.h"
 #include "DebugData.h"
 #include "PointerData.h"
 #include "UnwindBacktrace.h"
+#include "memory_hook.h"
 
 #include "android-base/stringprintf.h"
 #include "unwindstack/Error.h"
@@ -32,6 +36,86 @@ static inline bool ShouldBacktraceAllocSize(size_t size_bytes) {
     return size_bytes >= min_size_bytes && size_bytes <= max_size_bytes;
 }
 
+namespace {
+
+uint64_t HashPointer(uintptr_t pointer) {
+    uint64_t hash = static_cast<uint64_t>(pointer);
+    hash ^= hash >> 33;
+    hash *= 0xff51afd7ed558ccdULL;
+    hash ^= hash >> 33;
+    hash *= 0xc4ceb9fe1a85ec53ULL;
+    hash ^= hash >> 33;
+    return hash;
+}
+
+class PoissonSampler {
+public:
+    void SetSamplingInterval(uint64_t sampling_interval) {
+        sampling_interval_ = sampling_interval;
+        sampling_rate_ = 1.0 / static_cast<double>(sampling_interval_);
+        distribution_ = std::exponential_distribution<double>(sampling_rate_);
+        interval_to_next_sample_ = NextSampleInterval();
+    }
+
+    size_t SampleSize(size_t alloc_sz) {
+        return static_cast<size_t>(sampling_interval_ * NumberOfSamples(alloc_sz));
+    }
+
+private:
+    int64_t NextSampleInterval() {
+        int64_t next = static_cast<int64_t>(distribution_(engine_));
+        // Approximate the geometric distribution using an exponential draw,
+        // mirroring the approach used by heapprofd's sampler.
+        return next + 1;
+    }
+
+    size_t NumberOfSamples(size_t alloc_sz) {
+        interval_to_next_sample_ -= static_cast<int64_t>(alloc_sz);
+        size_t num_samples = 0;
+        while (interval_to_next_sample_ <= 0) {
+            interval_to_next_sample_ += NextSampleInterval();
+            ++num_samples;
+        }
+        return num_samples;
+    }
+
+    uint64_t sampling_interval_ = 1;
+    double sampling_rate_ = 1.0;
+    int64_t interval_to_next_sample_ = 1;
+    std::mt19937_64 engine_{1};
+    std::exponential_distribution<double> distribution_{1.0};
+};
+
+struct SamplerTlsState {
+    uint64_t configured_interval = 0;
+    PoissonSampler sampler;
+};
+
+pthread_key_t& GetSamplerTlsKey() {
+    static pthread_key_t key;
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    pthread_once(&once, []() { pthread_key_create(&key, nullptr); });
+    return key;
+}
+
+SamplerTlsState* GetThreadSamplerState() {
+    pthread_key_t& key = GetSamplerTlsKey();
+    auto* state = static_cast<SamplerTlsState*>(pthread_getspecific(key));
+    if (state != nullptr) {
+        return state;
+    }
+
+    void* storage = m_sys_malloc(sizeof(SamplerTlsState));
+    if (storage == nullptr) {
+        return nullptr;
+    }
+    state = new (storage) SamplerTlsState();
+    pthread_setspecific(key, state);
+    return state;
+}
+
+}  // namespace
+
 bool PointerData::Initialize(const Config& config) {
     pointers_.clear();
     key_to_index_.clear();
@@ -43,11 +127,52 @@ bool PointerData::Initialize(const Config& config) {
     cur_hash_index_ = kBacktraceEmptyIndex + 1;
     current_used = current_host = current_dma = 0;
     peak_tot = peak_host = peak_dma = 0;
+    for (auto& word : pointer_filter_) {
+        word.store(0, std::memory_order_relaxed);
+    }
 
     return true;
 }
 
-void PointerData::Add(const void* ptr, size_t pointer_size, MemType type) {
+bool PointerData::ShouldTrackAllocation(
+        size_t pointer_size, MemType type, size_t* tracked_size) {
+    *tracked_size = pointer_size;
+    if (type != HOST) {
+        return true;
+    }
+
+    const Config& config = g_debug->config();
+    if (!config.sampling_enabled()) {
+        return true;
+    }
+
+    SamplerTlsState* sampler_state = GetThreadSamplerState();
+    if (sampler_state == nullptr) {
+        return true;
+    }
+    if (sampler_state->configured_interval != config.sampling_interval_bytes()) {
+        sampler_state->sampler.SetSamplingInterval(config.sampling_interval_bytes());
+        sampler_state->configured_interval = config.sampling_interval_bytes();
+    }
+    *tracked_size = sampler_state->sampler.SampleSize(pointer_size);
+    return *tracked_size != 0;
+}
+
+bool PointerData::MightContain(const void* ptr) const {
+    uint64_t hash = HashPointer(reinterpret_cast<uintptr_t>(ptr));
+    size_t index0 = hash & (kPointerFilterWords - 1);
+    uint64_t bit0 = 1ULL << ((hash >> 16) & 63);
+    if ((pointer_filter_[index0].load(std::memory_order_relaxed) & bit0) == 0) {
+        return false;
+    }
+
+    size_t index1 = (hash >> 6) & (kPointerFilterWords - 1);
+    uint64_t bit1 = 1ULL << ((hash >> 22) & 63);
+    return (pointer_filter_[index1].load(std::memory_order_relaxed) & bit1) != 0;
+}
+
+void PointerData::Add(
+        const void* ptr, size_t pointer_size, size_t tracked_size, MemType type) {
     size_t hash_index = 0;
     hash_index = AddBacktrace(g_debug->config().backtrace_frames(), pointer_size);
 
@@ -59,11 +184,18 @@ void PointerData::Add(const void* ptr, size_t pointer_size, MemType type) {
     struct timeval tv;
     gettimeofday(&tv, NULL);
     uintptr_t mangled_ptr = ManglePointer(reinterpret_cast<uintptr_t>(ptr));
-    pointers_[mangled_ptr] = PointerInfoType{pointer_size, hash_index, type, tv};
-    current_used += pointer_size;
+    pointers_[mangled_ptr] = PointerInfoType{tracked_size, hash_index, type, tv};
+    uint64_t hash = HashPointer(reinterpret_cast<uintptr_t>(ptr));
+    size_t index0 = hash & (kPointerFilterWords - 1);
+    uint64_t bit0 = 1ULL << ((hash >> 16) & 63);
+    pointer_filter_[index0].fetch_or(bit0, std::memory_order_relaxed);
+    size_t index1 = (hash >> 6) & (kPointerFilterWords - 1);
+    uint64_t bit1 = 1ULL << ((hash >> 22) & 63);
+    pointer_filter_[index1].fetch_or(bit1, std::memory_order_relaxed);
+    current_used += tracked_size;
     size_t* current = (type == DMA) ? &current_dma : &current_host;
     size_t* peak = (type == DMA) ? &peak_dma : &peak_host;
-    *current += pointer_size;
+    *current += tracked_size;
     if (*current > *peak) {
         *peak = *current;
     }

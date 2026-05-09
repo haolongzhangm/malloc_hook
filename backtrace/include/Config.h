@@ -25,6 +25,8 @@ public:
     size_t backtrace_max_size_bytes() const { return backtrace_max_size_bytes_; }
 
     size_t backtrace_dump_peak_val() const { return backtrace_dump_peak_val_; }
+    size_t sampling_interval_bytes() const { return sampling_interval_bytes_; }
+    bool sampling_enabled() const { return sampling_interval_bytes_ > 1; }
 
 private:
     int backtrace_dump_signal_ = 0;
@@ -37,6 +39,7 @@ private:
     size_t backtrace_max_size_bytes_ = 0;
 
     size_t backtrace_dump_peak_val_ = 0;
+    size_t sampling_interval_bytes_ = 1;
 
     uint64_t options_ = 0;
 };

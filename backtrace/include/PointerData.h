@@ -6,8 +6,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <array>
 #include <memory>
 #include <mutex>
+#include <atomic>
 #include <unordered_map>
 #include <vector>
 
@@ -90,7 +92,10 @@ public:
 
     bool Initialize(const Config& config);
 
-    void Add(const void* ptr, size_t size, MemType type = HOST);
+    bool ShouldTrackAllocation(size_t size, MemType type, size_t* tracked_size);
+    bool MightContain(const void* ptr) const;
+    void Add(const void* ptr, size_t requested_size, size_t tracked_size,
+             MemType type = HOST);
     size_t AddBacktrace(size_t num_frames, size_t size_bytes);
     void Remove(const void* ptr);
     void RemoveBacktrace(size_t hash_index);
@@ -120,6 +125,8 @@ private:
     size_t current_used, current_host, current_dma;
     size_t peak_tot, peak_host, peak_dma;
     std::vector<ListInfoType> peak_list;
+    static constexpr size_t kPointerFilterWords = 1 << 13;
+    std::array<std::atomic<uint64_t>, kPointerFilterWords> pointer_filter_{};
 
     BIONIC_DISALLOW_COPY_AND_ASSIGN(PointerData);
 };

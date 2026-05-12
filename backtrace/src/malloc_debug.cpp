@@ -249,6 +249,27 @@ void* debug_memalign(size_t alignment, size_t bytes) {
     return pointer;
 }
 
+void* debug_aligned_alloc(size_t alignment, size_t bytes) {
+    if (DebugCallsDisabled()) {
+        return m_sys_aligned_alloc(alignment, bytes);
+    }
+
+    ScopedConcurrentLock lock;
+    ScopedDisableDebugCalls disable;
+
+    if (bytes > PointerInfoType::MaxSize()) {
+        errno = ENOMEM;
+        return nullptr;
+    }
+
+    void* pointer = m_sys_aligned_alloc(alignment, bytes);
+    if (pointer != nullptr && g_debug->TrackPointers()) {
+        g_debug->pointer->Add(pointer, bytes);
+    }
+
+    return pointer;
+}
+
 int debug_posix_memalign(void** memptr, size_t alignment, size_t size) {
     if (DebugCallsDisabled()) {
         return m_sys_posix_memalign(memptr, alignment, size);

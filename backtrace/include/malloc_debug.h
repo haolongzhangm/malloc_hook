@@ -11,6 +11,7 @@ void debug_free(void* pointer);
 void* debug_realloc(void* pointer, size_t bytes);
 void* debug_calloc(size_t nmemb, size_t bytes);
 void* debug_memalign(size_t alignment, size_t bytes);
+void* debug_aligned_alloc(size_t alignment, size_t bytes);
 int debug_posix_memalign(void** memptr, size_t alignment, size_t size);
 void* debug_mmap(void* addr, size_t size, int prot, int flags, int fd, off_t offset);
 int debug_munmap(void* addr, size_t size);

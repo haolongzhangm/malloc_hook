@@ -4,6 +4,7 @@ global:
     free;
     calloc;
     realloc;
+    aligned_alloc;
     memalign;
     posix_memalign;
     mmap;

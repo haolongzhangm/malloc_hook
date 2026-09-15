@@ -1,0 +1,7 @@
+[
+{
+  "directory": "/Volumes/PSSD/workspace/sdk/malloc_hook/build",
+  "command": "/Users/haoy/Library/Android/sdk/ndk/25.2.9519653/toolchains/llvm/prebuilt/darwin-x86_64/bin/clang++ --target=aarch64-none-linux-android28 --sysroot=/Users/haoy/Library/Android/sdk/ndk/25.2.9519653/toolchains/llvm/prebuilt/darwin-x86_64/sysroot -Ddma_alloc_hook_EXPORTS -I/Volumes/PSSD/workspace/sdk/malloc_hook/aosp_file/aosp_header/include -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security   -g -O3 -fPIC -O3 -DNDEBUG  -fPIC -std=gnu++17 -o CMakeFiles/dma_alloc_hook.dir/src/dma_alloc_hook.cpp.o -c /Volumes/PSSD/workspace/sdk/malloc_hook/src/dma_alloc_hook.cpp",
+  "file": "/Volumes/PSSD/workspace/sdk/malloc_hook/src/dma_alloc_hook.cpp"
+}
+]

@@ -1,14 +1,35 @@
 #include <dlfcn.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <linux/dma-heap.h>
+#include <sys/file.h>
 #include <sys/ioctl.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #include <utils/CallStack.h>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
 #include <mutex>
+#include <cstdint>
 #include <android/log.h>
+
+// Some Android NDK versions do not expose the legacy ION userspace header,
+// while the target device still supports ION_IOC_NEW_ALLOC.
+#ifndef ION_IOC_NEW_ALLOC
+struct ion_new_allocation_data {
+    uint64_t len;
+    uint32_t heap_id_mask;
+    uint32_t flags;
+    uint32_t fd;
+    uint32_t unused;
+};
+#define ION_IOC_MAGIC 'I'
+#define ION_IOC_NEW_ALLOC _IOWR(ION_IOC_MAGIC, 0, struct ion_new_allocation_data)
+#endif
 
 class Timer {
     std::chrono::high_resolution_clock::time_point m_start;
@@ -39,7 +60,66 @@ public:
     }
 };
 
+static bool hook_process_matches() {
+    static int cached = -1;
+    static pid_t owner_pid = -1;
+    static int owner_fd = -1;
+    if (owner_pid != -1 && owner_pid != getpid()) {
+        // A forked child inherits the cached state and lock fd. Only the
+        // process that won the lock may produce the log.
+        return false;
+    }
+    if (cached >= 0) {
+        return cached != 0;
+    }
+
+    // LD_PRELOAD is inherited by helper/worker processes. Keep one hook log
+    // only for the requested executable; the default is the native SVQ test
+    // binary used by rawsvq. Use C/POSIX file APIs here because this function
+    // can run during shared-library initialization.
+    const char* process_filter = getenv("DMA_ALLOC_HOOK_PROCESS");
+    if (process_filter == nullptr || process_filter[0] == '\0') {
+        process_filter = "svq_test";
+    }
+    char process_name[256] = {0};
+    FILE* cmdline = fopen("/proc/self/cmdline", "r");
+    if (cmdline == nullptr || fread(process_name, 1, sizeof(process_name) - 1, cmdline) == 0) {
+        if (cmdline != nullptr) {
+            fclose(cmdline);
+        }
+        cached = 0;
+        return false;
+    }
+    fclose(cmdline);
+
+    const char* base = strrchr(process_name, '/');
+    base = base == nullptr ? process_name : base + 1;
+    if (strcmp(base, process_filter) != 0) {
+        cached = 0;
+        return false;
+    }
+
+    // Multiple same-named target processes can still exist concurrently.
+    // Elect exactly one logger without requiring the caller to know its PID.
+    owner_fd = open("/data/local/tmp/dma_alloc_hook.owner", O_RDWR | O_CREAT, 0666);
+    if (owner_fd < 0 || flock(owner_fd, LOCK_EX | LOCK_NB) != 0) {
+        cached = 0;
+        if (owner_fd >= 0) {
+            syscall(__NR_close, owner_fd);
+            owner_fd = -1;
+        }
+        return false;
+    }
+    owner_pid = getpid();
+    cached = 1;
+    return cached != 0;
+}
+
 void print_log_to_file(const char* format, ...) {
+    if (!hook_process_matches()) {
+        return;
+    }
+
     char file_name[64] = {0};
     auto pid = getpid();
     sprintf(file_name, "/data/local/tmp/dma_alloc_hook_%d.log", pid);
@@ -60,9 +140,16 @@ class IoctlHook {
     int (*m_ioctl)(int __fd, int __request, ...);
     int (*m_close)(int __fd);
     std::mutex m_mutex;
-    //! fd with size time info
-    ////! <fd, <size, time>>
-    std::map<int, std::pair<size_t, double>> m_alloc_info;
+    struct AllocationInfo {
+        int fd;
+        size_t size;
+        double alloc_time_ms;
+    };
+
+    // A fd number can be reused after close(). The dma-buf inode identifies
+    // the underlying buffer and remains stable across that fd reuse.
+    //! <dma-buf inode, allocation info>
+    std::map<uint64_t, AllocationInfo> m_alloc_info;
     Timer m_timer;
     size_t m_alloc_count = 0;
     size_t m_used_size = 0;
@@ -124,9 +211,63 @@ class IoctlHook {
     void show_unreleased_fds() {
         for (auto& it : m_alloc_info) {
             print_log_to_file(
-                    "unreleased fd: %d, size: %f KB\n", it.first,
-                    it.second.first / 1024.0);
+                    "unreleased fd: %d, inode: %llu, size: %f KB\n", it.second.fd,
+                    static_cast<unsigned long long>(it.first),
+                    it.second.size / 1024.0);
         }
+    }
+
+    static bool get_inode(int fd, uint64_t* inode) {
+        if (inode == nullptr) {
+            return false;
+        }
+        struct stat st = {};
+        if (fstat(fd, &st) != 0) {
+            return false;
+        }
+        *inode = static_cast<uint64_t>(st.st_ino);
+        return *inode != 0;
+    }
+
+    void record_allocation(int fd, size_t size, unsigned int request,
+                           const char* allocator_name) {
+        uint64_t inode = 0;
+        if (!get_inode(fd, &inode)) {
+            print_log_to_file(
+                    "dma alloc happened but fstat failed: fd: %d, request: %u, size: %f KB\n",
+                    fd, request, size / 1024.0);
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto inserted = m_alloc_info.emplace(
+                inode, AllocationInfo{fd, size, m_timer.get_msecs()});
+        if (!inserted.second) {
+            print_log_to_file(
+                    "duplicate dma alloc inode: %llu, old fd: %d, new fd: %d, size: %f KB\n",
+                    static_cast<unsigned long long>(inode), inserted.first->second.fd, fd,
+                    size / 1024.0);
+            return;
+        }
+        m_alloc_count++;
+        m_used_size += size;
+        if (m_used_size > m_dma_peak) {
+            m_dma_peak = m_used_size;
+        }
+        auto non_dma_rss = show_non_dma_info();
+        auto total = m_used_size + non_dma_rss;
+        if (total > m_may_peak_with_dma_and_no_dma) {
+            m_may_peak_with_dma_and_no_dma = total;
+        }
+        print_log_to_file(
+                "dma alloc happened: allocator: %s, fd: %d, inode: %llu, request: %u size: %f "
+                "KB used: %f KB, peak: %f KB count: %zu\n",
+                allocator_name, fd, static_cast<unsigned long long>(inode), request,
+                size / 1024.0, m_used_size / 1024.0, m_dma_peak / 1024.0,
+                m_alloc_count);
+        bt();
+        show_peak_size();
+        show_used_size();
     }
 
 public:
@@ -167,24 +308,28 @@ public:
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
     int ioctl(int __fd, unsigned int __request, ...) {
-        auto msg = "pid: " + std::to_string(getpid()) + " fd: " + std::to_string(__fd) +
-                   " request: " + std::to_string(__request);
-        LOGE("%s", msg.c_str());
         va_list ap;
         va_start(ap, __request);
         void* arg = va_arg(ap, void*);
         va_end(ap);
+
+        // Some Android linker layouts can resolve RTLD_NEXT back to this
+        // interposer. Bypass the dynamic symbol on re-entry to prevent an
+        // unbounded ioctl -> hook recursion.
+        static thread_local bool forwarding = false;
+        if (forwarding) {
+            return static_cast<int>(syscall(__NR_ioctl, __fd, __request, arg));
+        }
+
+        if (__request == DMA_HEAP_IOCTL_ALLOC || __request == ION_IOC_NEW_ALLOC) {
+            LOGE("pid: %d fd: %d request: %u", getpid(), __fd, __request);
+        }
+        forwarding = true;
         int ret = m_ioctl(__fd, __request, arg);
-        //! show bactrace when __request is DMA_HEAP_IOCTL_ALLOC
-        if (__request == DMA_HEAP_IOCTL_ALLOC) {
-            std::lock_guard<std::mutex> lock(m_mutex);
+        forwarding = false;
+        if (ret == 0 && arg != nullptr && __request == DMA_HEAP_IOCTL_ALLOC) {
             struct dma_heap_allocation_data* heap_data =
-                    (struct dma_heap_allocation_data*)arg;
-            m_alloc_count++;
-            m_used_size += heap_data->len;
-            if (m_used_size > m_dma_peak) {
-                m_dma_peak = m_used_size;
-            }
+                    static_cast<struct dma_heap_allocation_data*>(arg);
             print_log_to_file(
                     "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
                     "+"
@@ -194,24 +339,17 @@ public:
             if (_ > m_may_peak_with_dma_and_no_dma) {
                 m_may_peak_with_dma_and_no_dma = _;
             }
-            print_log_to_file(
-                    "dma alloc happened: fd: %d(%d), request: %u size: %f KB used: %f "
-                    "KB, peak: %f KB count: %zu \n",
-                    __fd, heap_data->fd, __request, heap_data->len / 1024.0,
-                    m_used_size / 1024.0, m_dma_peak / 1024.0, m_alloc_count);
-
-            bt();
-            show_peak_size();
-            show_used_size();
+            record_allocation(heap_data->fd, heap_data->len, __request, "dma_heap");
             print_log_to_file(
                     "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
                     "+"
                     "++++\n");
-
-            //! save the alloc info with time info
-            m_alloc_info[heap_data->fd] = {heap_data->len, m_timer.get_msecs()};
-            //   print_log_to_file("alloc info: fd: %d, time: %ld\n", __fd,
-            //   m_alloc_info[heap_data->fd]);
+        } else if (ret == 0 && arg != nullptr && __request == ION_IOC_NEW_ALLOC) {
+            struct ion_new_allocation_data* ion_data =
+                    static_cast<struct ion_new_allocation_data*>(arg);
+            record_allocation(ion_data->fd, ion_data->len, __request, "ion");
+        } else if (__request == DMA_HEAP_IOCTL_ALLOC || __request == ION_IOC_NEW_ALLOC) {
+            LOGE("DMA alloc failed: ret=%d errno=%d", ret, errno);
         }
 
         return ret;
@@ -219,8 +357,12 @@ public:
 
     int close(int __fd) {
         // print_log_to_file("close fd: %d\n", __fd);
-        //! check __fd in m_alloc_info
-        if (m_alloc_info.find(__fd) != m_alloc_info.end()) {
+        uint64_t inode = 0;
+        if (get_inode(__fd, &inode)) {
+            auto it = m_alloc_info.find(inode);
+            if (it == m_alloc_info.end()) {
+                return m_close(__fd);
+            }
             //! TODO: recursive_mutex?
             std::lock_guard<std::mutex> lock(m_mutex);
             print_log_to_file(
@@ -228,15 +370,19 @@ public:
                     "+"
                     "++++\n");
             auto now = m_timer.get_msecs();
-            auto diff = now - m_alloc_info[__fd].second;
-            auto size = m_alloc_info[__fd].first;
+            auto diff = now - it->second.alloc_time_ms;
+            auto size = it->second.size;
             m_used_size -= size;
             m_alloc_count -= 1;
             print_log_to_file(
-                    "dma free happened: fd: %d, size: %f KB, duration: %f ms\n", __fd,
-                    size / 1024.0, diff);
-            bt();
-            m_alloc_info.erase(__fd);
+                    "dma free happened: fd: %d, inode: %llu, size: %f KB, duration: %f ms\n",
+                    __fd, static_cast<unsigned long long>(inode), size / 1024.0, diff);
+            // close() can be called from shared-library static destructors during
+            // process shutdown. Collecting a CallStack here may lazily initialize
+            // libunwindstack's pthread-key cache after runtime teardown has begun
+            // (and can abort there). Keep free accounting, but only capture stacks
+            // on the allocation path.
+            m_alloc_info.erase(it);
             show_peak_size();
             show_used_size();
             show_unreleased_fds();

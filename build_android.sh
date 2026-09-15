@@ -17,11 +17,11 @@ else
     echo "use $NDK_ROOT to build for android"
 fi
 
-echo "check NDK is invalid or not..."
-if [ ! -f "$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang++" ]; then
-    echo "NDK_ROOT is invalid"
-    exit 1
-fi
+# echo "check NDK is invalid or not..."
+# if [ ! -f "$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang++" ]; then
+#     echo "NDK_ROOT is invalid"
+#     exit 1
+# fi
 
 CMAKE_PARA_ANDROID="-DCMAKE_TOOLCHAIN_FILE=${NDK_ROOT}/build/cmake/android.toolchain.cmake \
 	-DANDROID_NDK=${NDK_ROOT} \
